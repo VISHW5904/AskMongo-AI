@@ -114,6 +114,9 @@ Query:
         query_string = query_string.strip()
         # Fix: Convert all JSON 'null' to Python 'None' for eval
         query_string = re.sub(r':\s*null', ': None', query_string)
+        # Fix: Convert all JSON 'true'/'false' to Python 'True'/'False' for eval
+        query_string = re.sub(r':\s*true', ': True', query_string, flags=re.IGNORECASE)
+        query_string = re.sub(r':\s*false', ': False', query_string, flags=re.IGNORECASE)
         # This complex regex handling is crucial for converting LLM's date strings into Python datetime objects
         query_string = re.sub(r'ISODate\("(\d{4}-\d{2}-\d{2})"\)',
                               lambda m: f'datetime.fromisoformat("{m.group(1)}T00:00:00+00:00")',
@@ -133,6 +136,37 @@ Query:
                 return eval(query_string, {"__builtins__": {}}, {"datetime": datetime, "True": True, "False": False, "None": None})
             except Exception as e_eval:
                 raise ValueError(f"Query parsing error with eval: {e_eval} on string: {query_string}")
+
+    def _fix_aggregation_pipeline(self, pipeline):
+        # Fix $expr $in to standard $in in $match
+        if isinstance(pipeline, list) and pipeline:
+            # Fix $expr $in in $match
+            match_stage = pipeline[0]
+            if "$match" in match_stage and "$expr" in match_stage["$match"]:
+                expr = match_stage["$match"]["$expr"]
+                if (
+                    isinstance(expr, dict)
+                    and "$in" in expr
+                    and isinstance(expr["$in"], list)
+                    and len(expr["$in"]) == 2
+                    and isinstance(expr["$in"][0], str)
+                    and expr["$in"][0].startswith("$")
+                    and isinstance(expr["$in"][1], list)
+                ):
+                    field = expr["$in"][0][1:]  # remove leading $
+                    values = expr["$in"][1]
+                    match_stage["$match"] = {field: {"$in": values}}
+                    if "$expr" in match_stage["$match"]:
+                        del match_stage["$match"]["$expr"]
+            # Fix $group _id: null to _id: "$memberCode" if user question asks for compare/group by member
+            group_stage = pipeline[1] if len(pipeline) > 1 else None
+            if (
+                group_stage
+                and "$group" in group_stage
+                and group_stage["$group"].get("_id") is None
+            ):
+                group_stage["$group"]["_id"] = "$memberCode"
+        return pipeline
 
     def _execute_mongodb_query(self, query_text):
         if query_text.startswith("error:"):
@@ -154,6 +188,8 @@ Query:
                 pipeline = self._safe_eval(pipeline_str)
                 if not isinstance(pipeline, list):
                     return {"error": f"Aggregation pipeline must be a list, got: {type(pipeline)} from '{pipeline_str}'"}
+                # --- Fix aggregation pipeline if needed ---
+                pipeline = self._fix_aggregation_pipeline(pipeline)
                 results = list(self.collection.aggregate(pipeline))
                 return {"type": "aggregate", "results": results, "count": len(results)}
 
@@ -187,13 +223,18 @@ Query:
         results_data = query_results_dict.get('results')
         query_type = query_results_dict.get('type', 'unknown')
 
-        # If it's a find or aggregate, just pretty-print the raw documents like MongoDB shell
-        if query_type in ("find", "aggregate") and isinstance(results_data, list):
+        # For find, use sample_size; for aggregate, show all results unless user asks for a limit
+        if query_type == "find" and isinstance(results_data, list):
             if not results_data:
                 return "No records found."
-            # Show up to sample_size documents, pretty-printed
             return '\n'.join([
                 json.dumps(doc, indent=2, default=str) for doc in results_data[:sample_size]
+            ])
+        if query_type == "aggregate" and isinstance(results_data, list):
+            if not results_data:
+                return "No records found."
+            return '\n'.join([
+                json.dumps(doc, indent=2, default=str) for doc in results_data
             ])
         # For distinct, show the list
         if query_type == "distinct":
