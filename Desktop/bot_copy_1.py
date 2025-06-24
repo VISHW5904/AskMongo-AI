@@ -51,14 +51,14 @@ class EnhancedMongoDBBot:
         code_matches = re.findall(r'\b\d{8,}\b', user_question)
         number_matches = re.findall(r'\b\d+\.?\d*\b', user_question)
 
-        prompt = f"""
+        prompt = """
 You are an expert MongoDB query generator for a milk collection database.
-Your goal is to convert the user's natural language question into a MongoDB query string
+Your ONLY job is to convert the user's natural language question into a MongoDB query string
 that can be executed by PyMongo's `collection.find()` or `collection.aggregate()` methods.
 
 Collection Name: milk_collections
 Sample Document Structure (field: type):
-{json.dumps(self.schema_info, indent=2)}
+%s
 
 Key Fields (and common aliases from user questions):
 - "memberCode" (string): member, member code
@@ -71,35 +71,68 @@ Key Fields (and common aliases from user questions):
   If only a date is given (e.g., "on 01/01/2025"), interpret it as the full day:
   {{"$gte": ISODate("2025-01-01T00:00:00Z"), "$lt": ISODate("2025-01-02T00:00:00Z")}}
 
-User Question: "{user_question}"
+User Question: "%s"
 
 Query Generation Rules:
-1.  For simple filters output a find query. Example: `find({{"memberCode": "123", "fat": {{"$gt": 3.5}}}})`.
-2.  For aggregations (sum, average, count, group by, top N), output an aggregation pipeline. Example: `aggregate([{{"$match": {{"fat": {{"$gt": 3.5}}}}}}, {{"$group": {{"_id": "$memberCode", "avgFat": {{"$avg": "$fat"}}}}}}])`.
-3.  Date Handling:
-    - If a specific date like "01/01/2025" is mentioned, filter for the entire day.
-    - For date ranges like "between 01/01/2025 and 03/01/2025", use `$gte` for the start date and `$lt` for the day *after* the end date.
-    - Convert all date strings to ISODate format, e.g., ISODate("YYYY-MM-DDTHH:MM:SSZ").
-4.  Comparisons: For "greater than", use `$gt`. For "less than", use `$lt`.
-5.  Top/Bottom N: Use `$sort` and `$limit` in an aggregation pipeline. Ensure the field for sorting is correct (e.g., "$qty" for quantity, or a summed field like "$totalQuantity" if grouped).
-6.  Averages: Use `$avg` in a `$group` stage.
-7.  Counts: For specific counts, use `count_documents({{filter}})`. For grouped counts, use `$sum: 1` in `$group`.
-8.  Distinct values: use `distinct("fieldName", {{filter}})`.
-9.  Handle numbers as numbers in queries, not strings, unless they are codes.
-10. Ensure all MongoDB operators (like $match, $group, $gte, $sum, $avg, $sort, $limit) and field names (like memberCode, qty) are enclosed in double quotes.
+- All field names and values are dynamic and should be inferred from the user question.
+1. Output ONLY a valid MongoDB query string, starting with aggregate([ ... ]), find({ ... }), distinct(...), or count_documents(...).
+2. Do NOT include any code block markers, language names, explanations, or comments.
+3. Do NOT include "python", "json", or "mongodb" anywhere in your output.
+4. Do NOT include any text before or after the query string.
+5. For simple filters output a find query. Example: find({{"memberCode": "123", "fat": {{"$gt": 3.5}}}}).
+6. For aggregations (sum, average, count, group by, top N, min, max, trend, compare), output an aggregation pipeline. Example: aggregate([{{"$match": {{"fat": {{"$gt": 3.5}}}}}}, {{"$group": {{"_id": "$memberCode", "avgFat": {{"$avg": "$fat"}}}}}}]).
+7. Date Handling: If a specific date like "01/01/2025" is mentioned, filter for the entire day. For date ranges like "between 01/01/2025 and 03/01/2025", use $gte for the start date and $lt for the day after the end date. Convert all date strings to ISODate format, e.g., ISODate("YYYY-MM-DDTHH:MM:SSZ").
+8. Comparisons: For "greater than", use $gt. For "less than", use $lt.
+9. Top/Bottom N: Use $sort and $limit in an aggregation pipeline. For "top" use $sort: -1, for "least" or "lowest" use $sort: 1. Ensure the field for sorting is correct (e.g., "$qty" for quantity, or a summed field like "$totalQuantity" if grouped).
+10. Averages: Use $avg in a $group stage.
+11. Minimum/Maximum: Use $min/$max in a $group stage, or $sort + $limit for records.
+12. Counts: For specific counts, use count_documents({{filter}}). For grouped counts, use $sum: 1 in $group.
+13. Distinct values: use distinct("fieldName", {{filter}})
+14. Handle numbers as numbers in queries, not strings, unless they are codes.
+15. Ensure all MongoDB operators (like $match, $group, $gte, $sum, $avg, $min, $max, $sort, $limit) and field names (like memberCode, qty) are enclosed in double quotes.
+16. If the user asks for results by month, group by the month extracted from the date field using {{"month": {{"$month": "$dateTimeOfCollection"}}}} in the aggregation _id.
+17. If the user asks for specific months (e.g., November and December), include a filter in the $match stage using $expr and $in with $month, e.g., {"$expr": {"$and": [ ... ]}}. Do not use $and in $match for month filtering; always use $expr and $in with $month and $year for month-based filtering.
+18. For trend questions (trend of X per month/year), group by month/year and use $avg/$sum as needed, and $sort by time.
+19. For compare questions (compare X for member A and member B), use $match with $in for codes, group by code and time if needed.
+20. For top/least by field, use $group, $sort, and $limit.
+21. For lowest/highest value on a date, use $match for the date, $sort, and $limit:1.
+22. For unique values, use distinct.
 
-Output ONLY the MongoDB query method name and its arguments. Examples:
-`find({{"memberCode": "12345"}})`
-`aggregate([{{"$match": {{"memberCode": "12345"}}}}, {{"$group": {{"_id": null, "totalQuantity": {{"$sum": "$qty"}}}}}}])`
-`distinct("memberCode", {{"fat": {{"$gt": 4.0}}}}) `
-`count_documents({{"memberCode": "12345"}}) `
+Examples:
+find({{"memberCode": "12345"}})
+find({{"memberCode": "0010000019930016"}})
+find({{"dcsCode": "001000001993", "dateTimeOfCollection": {{"$gte": ISODate("2025-01-01T00:00:00Z"), "$lt": ISODate("2025-03-02T00:00:00Z")}}}})
+find({{"fat": {{"$gt": 4.1}}}})
+find({{"memberCode": "0010000019930016", "fat": {{"$gt": 4.1}}, "dateTimeOfCollection": {{"$gte": ISODate("2025-01-01T00:00:00Z"), "$lt": ISODate("2025-02-01T00:00:00Z")}}}})
+find({{"snf": {{"$gt": 9}}, "fat": {{"$gt": 3}}}})
+find({{"memberCode": "0010000019930016", "snf": {{"$gt": 8.5}}, "fat": {{"$gt": 4.1}}}})
+distinct("memberCode", {{}})
+distinct("memberCode", {{"qty": {{"$gt": 100}}}})
+aggregate([{{"$match": {{}}}}, {{"$group": {{"_id": "$memberCode", "totalQty": {{"$sum": "$qty"}}}}}}, {{"$sort": {{"totalQty": -1}}}}, {{"$limit": 5}}])
+aggregate([{{"$match": {{"dcsCode": "001000001993"}}}}, {{"$group": {{"_id": "$dcsCode", "minSNF": {{"$min": "$snf"}}}}}}])
+aggregate([{{"$match": {{"dateTimeOfCollection": {{"$gte": ISODate("2024-11-09T00:00:00Z"), "$lt": ISODate("2024-11-10T00:00:00Z")}}}}}}, {{"$sort": {{"qty": 1}}}}, {{"$limit": 1}}])
+aggregate([{{"$match": {{"dcsCode": "001000001993"}}}}, {{"$group": {{"_id": "$dcsCode", "minSNF": {{"$min": "$snf"}}}}}}])
+aggregate([{{"$match": {{}}}}, {{"$group": {{"_id": "$memberCode", "avgSNF": {{"$avg": "$snf"}}}}}}, {{"$sort": {{"avgSNF": -1}}}}, {{"$limit": 1}}])
+aggregate([{{"$match": {{"$expr": {{"$and": [{{"$in": ["$memberCode", ["0010000019930016", "0010000004790107"]]}}, {{"$in": [{{"$month": "$dateTimeOfCollection"}}, [11, 12]]}}, {{"$eq": [{{"$year": "$dateTimeOfCollection"}}, 2024]}}]}}}}}}, {{"$group": {{"_id": {{"memberCode": "$memberCode", "month": {{"$month": "$dateTimeOfCollection"}}}}, "averageQty": {{"$avg": "$qty"}}}}}}, {{"$sort": {{"_id.memberCode": 1, "_id.month": 1}}}}])
+aggregate([{{"$match": {{}}}}, {{"$group": {{"_id": {{"month": {{"$month": "$dateTimeOfCollection"}}}}, "avgFat": {{"$avg": "$fat"}}}}}}, {{"$sort": {{"_id.month": 1}}}}])
+aggregate([{{"$match": {{"memberCode": "0010000008650047"}}}}, {{"$group": {{"_id": {{"month": {{"$month": "$dateTimeOfCollection"}}}}, "avgFat": {{"$avg": "$fat"}}}}}}, {{"$sort": {{"_id.month": 1}}}}])
+aggregate([{{"$match": {{}}}}, {{"$group": {{"_id": {{"year": {{"$year": "$dateTimeOfCollection"}}}}, "totalQty": {{"$sum": "$qty"}}}}}}, {{"$sort": {{"_id.year": 1}}}}])
+aggregate([{{"$match": {{"$expr": {{"$and": [{{"$in": ["$memberCode", ["0010000019930016", "0010000004790107"]]}}, {{"$in": [{{"$month": "$dateTimeOfCollection"}}, [11, 12]]}}, {{"$eq": [{{"$year": "$dateTimeOfCollection"}}, 2024]}}]}}}}}}, {{"$group": {{"_id": {{"memberCode": "$memberCode", "month": {{"$month": "$dateTimeOfCollection"}}}}, "avgQty": {{"$avg": "$qty"}}, "avgSnf": {{"$avg": "$snf"}}, "avgFat": {{"$avg": "$fat"}}}}}}, {{"$sort": {{"_id.memberCode": 1, "_id.month": 1}}}}])
 
 Query:
-"""
+""" % (json.dumps(self.schema_info, indent=2), user_question)
         try:
             response = self.model.generate_content(prompt)
             query_text = response.text.strip()
-            query_text = query_text.replace('```mongodb', '').replace('```json', '').replace('```', '').strip()
+            # Remove code block markers, language names, and any explanations
+            query_text = re.sub(r"^(```\\w*\\n*)|(```)$", "", query_text, flags=re.MULTILINE).strip()
+            query_text = re.sub(r"^(python|json|mongodb)\\n*", "", query_text, flags=re.IGNORECASE).strip()
+            # Remove any lines before the query string
+            lines = query_text.splitlines()
+            for line in lines:
+                if line.strip().startswith(('find(', 'aggregate(', 'distinct(', 'count_documents(')):
+                    query_text = line.strip()
+                    break
             return query_text.strip()
         except Exception as e:
             print(f"Error generating query with LLM: {e}")
@@ -117,16 +150,19 @@ Query:
         # Fix: Convert all JSON 'true'/'false' to Python 'True'/'False' for eval
         query_string = re.sub(r':\s*true', ': True', query_string, flags=re.IGNORECASE)
         query_string = re.sub(r':\s*false', ': False', query_string, flags=re.IGNORECASE)
-        # This complex regex handling is crucial for converting LLM's date strings into Python datetime objects
-        query_string = re.sub(r'ISODate\("(\d{4}-\d{2}-\d{2})"\)',
-                              lambda m: f'datetime.fromisoformat("{m.group(1)}T00:00:00+00:00")',
-                              query_string)
-        query_string = re.sub(r'ISODate\("(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?!\+00:00|Z)"\)',
-                              lambda m: f'datetime.fromisoformat("{m.group(1)}+00:00")',
-                              query_string)
-        query_string = re.sub(r'ISODate\("([^"]+)"\)',
-                            lambda m: f'datetime.fromisoformat("{m.group(1).replace("Z", "+00:00")}")',
-                            query_string)
+        # Replace all ISODate("...") with datetime.fromisoformat(...) globally, even if nested
+        def iso_to_datetime(match):
+            iso = match.group(1).replace('Z', '+00:00')
+            if 'T' not in iso:
+                iso += 'T00:00:00+00:00'
+            elif '+' not in iso and '-' not in iso[-6:]:
+                iso += '+00:00'
+            return f'datetime.fromisoformat("{iso}")'
+        query_string = re.sub(r'ISODate\("([^\"]+)"\)', iso_to_datetime, query_string)
+        # Remove trailing commas before } or ] everywhere in the string (not just at the end)
+        query_string = re.sub(r',\s*([}\]])', r'\1', query_string)
+        # Remove any trailing commas before ) (for function calls like find(...,))
+        query_string = re.sub(r',\s*\)', ')', query_string)
         try:
             # ast.literal_eval is safer than eval, but can't handle function calls like datetime()
             return ast.literal_eval(query_string)
@@ -168,6 +204,18 @@ Query:
                 group_stage["$group"]["_id"] = "$memberCode"
         return pipeline
 
+    def _has_invalid_top_level_operator(self, obj):
+        """Check if a dict or list has a top-level key that is a MongoDB operator (starts with $)."""
+        if isinstance(obj, dict):
+            for k in obj.keys():
+                if isinstance(k, str) and k.startswith('$'):
+                    return True
+        elif isinstance(obj, list):
+            for item in obj:
+                if self._has_invalid_top_level_operator(item):
+                    return True
+        return False
+
     def _execute_mongodb_query(self, query_text):
         if query_text.startswith("error:"):
             return {"error": query_text}
@@ -178,6 +226,9 @@ Query:
                 query_params_str = match.group(1).strip()
                 limit = int(match.group(2)) if match.group(2) else 50
                 filter_query = self._safe_eval(query_params_str) if query_params_str else {}
+                # --- Validation for top-level operator ---
+                if self._has_invalid_top_level_operator(filter_query):
+                    return {"error": "Invalid query: top-level key cannot be a MongoDB operator like $gte, $lt, etc. Please rephrase your question."}
                 results = list(self.collection.find(filter_query).limit(limit))
                 return {"type": "find", "results": results, "count": len(results)}
 
@@ -190,6 +241,11 @@ Query:
                     return {"error": f"Aggregation pipeline must be a list, got: {type(pipeline)} from '{pipeline_str}'"}
                 # --- Fix aggregation pipeline if needed ---
                 pipeline = self._fix_aggregation_pipeline(pipeline)
+                # --- Validation for top-level operator in $match ---
+                if pipeline and "$match" in pipeline[0]:
+                    match_stage = pipeline[0]["$match"]
+                    if self._has_invalid_top_level_operator(match_stage):
+                        return {"error": "Invalid aggregation: $match stage has a top-level MongoDB operator like $gte, $lt, etc. Please rephrase your question."}
                 results = list(self.collection.aggregate(pipeline))
                 return {"type": "aggregate", "results": results, "count": len(results)}
 
@@ -199,6 +255,9 @@ Query:
                 field_name = match.group(1)
                 filter_str = match.group(2).strip() if match.group(2) else None
                 filter_query = self._safe_eval(filter_str) if filter_str else {}
+                # --- Validation for top-level operator ---
+                if self._has_invalid_top_level_operator(filter_query):
+                    return {"error": "Invalid query: top-level key cannot be a MongoDB operator like $gte, $lt, etc. Please rephrase your question."}
                 results = self.collection.distinct(field_name, filter_query)
                 limited_results = results[:50]
                 return {"type": "distinct", "field": field_name, "results": limited_results, "count": len(results), "actual_count_limited": len(limited_results) < len(results) }
@@ -208,6 +267,9 @@ Query:
                 if not match: return {"error": f"Invalid count_documents query format: {query_text}"}
                 filter_str = match.group(1).strip()
                 filter_query = self._safe_eval(filter_str) if filter_str else {}
+                # --- Validation for top-level operator ---
+                if self._has_invalid_top_level_operator(filter_query):
+                    return {"error": "Invalid query: top-level key cannot be a MongoDB operator like $gte, $lt, etc. Please rephrase your question."}
                 count = self.collection.count_documents(filter_query)
                 return {"type": "count", "results": count}
             else:
@@ -274,7 +336,7 @@ Query:
         print(f" LLM generated query string: {mongo_query_str}")
 
         if not self._validate_llm_query(mongo_query_str):
-            print("❌ LLM did not return a valid MongoDB query. Showing raw output.")
+            print(" LLM did not return a valid MongoDB query. Showing raw output.")
             return f"Sorry, I could not understand your question well enough to generate a valid MongoDB query.\n\nRaw LLM output: {mongo_query_str}\nPlease try rephrasing your question."
 
         if mongo_query_str.startswith("error:"):
@@ -355,11 +417,11 @@ def main():
         # --- IMPORTANT ---
         # Replace these placeholders with your actual credentials.
         # It's recommended to use environment variables for security.
-        GEMINI_API_KEY = "AIzaSyBW273iyp3NdBJdBEQzkRTRpUvZv-VcFuc"
-        MONGODB_CONNECTION_STRING = "mongodb://user:pass@192.168.1.236:27017/?authSource=admin"
+        GEMINI_API_KEY = "xxx"
+        MONGODB_CONNECTION_STRING = "xxx"
 
         if GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE" or MONGODB_CONNECTION_STRING == "YOUR_MONGODB_CONNECTION_STRING_HERE":
-            print("\n‼️ CRITICAL SETUP REQUIRED ‼️")
+            print("\n CRITICAL SETUP REQUIRED ")
             print("Please open the script and replace the placeholder values for")
             print("GEMINI_API_KEY and MONGODB_CONNECTION_STRING in the main() function.")
             return
@@ -387,7 +449,7 @@ def main():
             print(f"\n Answer:\n{response}")
             print("="*70 + "\n")
     except Exception as e:
-        print(f"\n❌ An unexpected error occurred in main: {e}")
+        print(f"\n An unexpected error occurred in main: {e}")
 
 if __name__ == "__main__":
     main()
