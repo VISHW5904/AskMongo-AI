@@ -58,7 +58,8 @@ You are an expert MongoDB query generator. Your ONLY task is to convert a user's
 
 **DATABASE SCHEMA**
 - Collection Name: `milk_collections`
-- Schema: %s
+- Schema for your reference:
+%s
 
 **KEY FIELDS & ALIASES**
 - `memberCode` (string): member, member code
@@ -140,6 +141,9 @@ You are an expert MongoDB query generator. Your ONLY task is to convert a user's
         if not query_string:
             return {} # An empty query string means an empty filter
 
+        # Replace JavaScript-style null with Python None
+        query_string = re.sub(r'\bnull\b', 'None', query_string, flags=re.IGNORECASE)
+
         # 1. Replace MongoDB-specific syntax with Python-compatible equivalents.
         # Handle ISODate("...") by replacing it with a Python datetime constructor call
         def iso_to_datetime_str(match):
@@ -179,26 +183,58 @@ You are an expert MongoDB query generator. Your ONLY task is to convert a user's
         
         try:
             if query_text.startswith('find('):
-                match = re.match(r'find\((.*)\)$', query_text, re.DOTALL)
-                if not match: return {"error": f"Invalid find query format: {query_text}"}
-                
-                # Extract filter and potential projection
+                # Robustly extract the arguments inside find(...)
+                match = re.match(r'find\((.*)\)$', query_text.strip(), re.DOTALL)
+                if not match:
+                    return {"error": f"Invalid find query format: {query_text}"}
                 args_str = match.group(1).strip()
-                filter_str = args_str.split(',', 1)[0] if args_str else "{}"
-                
+                # Support both find(filter) and find(filter, projection)
+                if args_str:
+                    # Split on first comma not inside braces or brackets
+                    depth = 0
+                    split_idx = None
+                    for i, c in enumerate(args_str):
+                        if c in '{[':
+                            depth += 1
+                        elif c in '}]':
+                            depth -= 1
+                        elif c == ',' and depth == 0:
+                            split_idx = i
+                            break
+                    if split_idx is not None:
+                        filter_str = args_str[:split_idx].strip()
+                        projection_str = args_str[split_idx+1:].strip()
+                    else:
+                        filter_str = args_str
+                        projection_str = None
+                else:
+                    filter_str = "{}"
+                    projection_str = None
+                # Evaluate filter
                 filter_query = self._safe_eval(filter_str)
                 if self._has_invalid_top_level_operator(filter_query):
                     return {"error": "Invalid query: a top-level key cannot be a MongoDB operator (like $gt, $lt). Please rephrase your question to specify a field."}
-                
+                # Evaluate projection if present
+                if projection_str:
+                    # Remove trailing .limit(...) if present
+                    projection_str = re.sub(r'\)\.limit\(\d+\)\s*$', '', projection_str)
+                    projection_str = re.sub(r'\.limit\(\d+\)\s*$', '', projection_str)
+                    try:
+                        projection = self._safe_eval(projection_str)
+                    except Exception as e:
+                        return {"error": f"Projection parsing error: {e}"}
+                    cursor = self.collection.find(filter_query, projection)
+                else:
+                    cursor = self.collection.find(filter_query)
                 # Support dynamic limit if specified in the query, otherwise return all matching records
                 match_limit = re.search(r'\.limit\((\d+)\)', query_text)
                 if match_limit:
                     limit = int(match_limit.group(1))
-                    results = list(self.collection.find(filter_query).limit(limit))
+                    results = list(cursor.limit(limit))
                     total_count = self.collection.count_documents(filter_query)
                     return {"type": "find", "results": results, "count": len(results), "total_count": total_count}
                 else:
-                    results = list(self.collection.find(filter_query))
+                    results = list(cursor)
                     return {"type": "find", "results": results, "count": len(results)}
 
             elif query_text.startswith('aggregate('):
@@ -353,8 +389,8 @@ def main():
         # --- IMPORTANT ---
         # Replace these placeholders with your actual credentials.
         # It's recommended to use environment variables for security.
-        GEMINI_API_KEY = "vvv"  # <--- REPLACE THIS
-        MONGODB_CONNECTION_STRING = "vvv" # <--- REPLACE THIS
+        GEMINI_API_KEY = "xyz"  # <--- REPLACE THIS
+        MONGODB_CONNECTION_STRING = "xyz"  # <--- REPLACE THIS
 
         if GEMINI_API_KEY.startswith("YOUR_") or MONGODB_CONNECTION_STRING.startswith("YOUR_"):
             print("\n🚨 CRITICAL SETUP REQUIRED 🚨")
