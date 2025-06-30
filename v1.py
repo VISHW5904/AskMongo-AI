@@ -1,5 +1,3 @@
-# --- START OF FILE v.py ---
-
 import pymongo
 import google.generativeai as genai
 import json
@@ -10,7 +8,7 @@ import ast
 class EnhancedMongoDBBot:
     def __init__(self, gemini_api_key, mongodb_connection_string):
         genai.configure(api_key=gemini_api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        self.model = genai.GenerativeModel('gemini-2.5-pro')
 
         try:
             self.client = pymongo.MongoClient(mongodb_connection_string)
@@ -26,11 +24,14 @@ class EnhancedMongoDBBot:
             raise
 
         self.schema_info = self._get_collection_schema()
-        # Note: field_mappings are not used directly, but are for context in the prompt.
         self.field_mappings = {
-            'member': 'memberCode', 'dcs': 'dcsCode', 'quantity': 'qty',
-            'fat': 'fat', 'snf': 'snf', 'date': 'dateTimeOfCollection',
-            'plant': 'plantCode', 'union': 'unionCode'
+            'member': 'memberCode', 'membercode': 'memberCode', 'member code': 'memberCode', 'members': 'memberCode', 'member codes': 'memberCode', 'membercodes': 'memberCode',
+            'dcs': 'dcsCode', 'dcscode': 'dcsCode', 'dcs codes': 'dcsCode', 'dcscodes': 'dcsCode', 'dcs code': 'dcsCode',
+            'quantity': 'qty', 'fat': 'fat', 'amount': 'amount', 'amt': 'amount',
+            'milk': 'qty', 'qty': 'qty', 'milk quantity': 'qty', 'milk qty': 'qty',
+            'snf': 'snf', 'date': 'dateTimeOfCollection', 'datetime': 'dateTimeOfCollection',
+            'collection_date': 'dateTimeOfCollection', 'plant': 'plantCode',
+            'plantcode': 'plantCode', 'union': 'unionCode', 'unioncode': 'unionCode'
         }
 
     def _get_collection_schema(self):
@@ -124,6 +125,8 @@ You are an expert MongoDB query generator. Your ONLY task is to convert a user's
             # Clean up potential markdown code blocks, just in case
             query_text = re.sub(r"^(```(json|mongodb|python)?\n?)", "", query_text)
             query_text = re.sub(r"```$", "", query_text)
+            # Remove leading/trailing backticks
+            query_text = query_text.strip('`')
             return query_text.strip()
         except Exception as e:
             print(f"Error generating query with LLM: {e}")
@@ -254,16 +257,16 @@ You are an expert MongoDB query generator. Your ONLY task is to convert a user's
                 return {"type": "aggregate", "results": results, "count": len(results)}
 
             elif query_text.startswith('distinct('):
-                match = re.match(r'distinct\("([^"]+)"(?:,\s*(.*))?\)$', query_text, re.DOTALL)
-                if not match: return {"error": f"Invalid distinct query format: {query_text}"}
-                
+                # Support: distinct("field", filter) or distinct("field", filter, ...)
+                match = re.match(r'distinct\("([^"]+)"(?:,\s*(\{.*?\}))?(?:,\s*(\{.*?\}))?\)$', query_text, re.DOTALL)
+                if not match:
+                    return {"error": f"Invalid distinct query format: {query_text}"}
                 field_name = match.group(1)
                 filter_str = match.group(2).strip() if match.group(2) else "{}"
+                # Ignore any third argument (like limit) for distinct
                 filter_query = self._safe_eval(filter_str)
-
                 if self._has_invalid_top_level_operator(filter_query):
                     return {"error": "Invalid query: a top-level key cannot be a MongoDB operator (like $gt, $lt). Please rephrase your question to specify a field."}
-                
                 results = self.collection.distinct(field_name, filter_query)
                 return {"type": "distinct", "field": field_name, "results": results, "count": len(results)}
 
